@@ -2,21 +2,99 @@
 const mongoose = require('mongoose');
 const express = require('express')
 const bodyParser = require('body-parser');
+var rmq = require('amqplib/callback_api');
+
 
 //Express Instance and port
 const app = express()
 const port = 3000
 
+
+var rMQStart = false;
+var aliveStatus = true;
+var interval = new Date().getTime() / 1000;
+
+var nodeMessage = { nodeID: nodeID, hostname: nodeHostName, lastMessage: interval, alive: alive };
+var nodeList = [];
+nodeList.push(nodeMessage);
+
+
 //DB connect string
 const connStr = 'mongodb://localmongo1:27017,localmongo2:27017,localmongo3:27017/NotFLIXDB?replicaSet=rs0';
 
-setInterval(function() {
+//Node outputs live status every 5 sec
+setInterval(function () {
+  rmq.connect('amqp://user:bitnami@6130COMP-Assignment_haproxy_1', function (error0, connection) {
+    if (error0) {
+      throw error0;
+    }
+    connection.createChannel(function (error1, channel) {
+      if (error1) {
+        throw error1;
+      }
+      var status = "node alive";
+      interval = new Date().getTime() / 1000;
+      var msg = `{"nodeID": ${nodeID}, "hostname": "${nodeHostName}", "alive":"${aliveStatus}"}`
+      var jsonMsg = JSON.stringify(JSON.parse(msg));
+      channel.assertExchange(status, 'fanout', {
+        durable: false
+      });
+      channel.publish(status, '', Buffer.from(jsonMsg));
+    });
+    setTimeout(function () {
+      connection.close();
+    }, 500);
+  });
+}, 5000);
 
-  console.log(`Intervals are used to fire a function for the lifetime of an application.`);
+//Node subscribe to msg
+rmq.connect('amqp://user:bitnami@6130COMP-Assignment_haproxy_1', function (error0, connection) {
+  if (error0) {
+    throw error0;
+  }
+  connection.createChannel(function (error1, channel) {
+    if (error1) {
+      throw error1;
+    }
+    var status = 'node alive';
+    channel.assertExchange(status, 'fanout', {
+      durable: false
+    });
+    channel.assertQueue('', {
+      exclusive: true
+    }, function (error2, q) {
+      if (error2) {
+        throw error2;
+      }
+      console.log(" [*] Waiting for messages. Press CTRL+C to exit", q.queue);
+      channel.bindQueue(q.queue, status, '');
+      channel.consume(q.queue, function (msg) {
+        if (msg.content) {
+          rMQStart = true;
+          var msgNode = JSON.parse(msg.content.toString());
+          interval = new Date().getTime() / 1000;
+          if (nodeList.some(nodes => nodes.hostname === msgNode.hostname)) {
+            var matchedNode = nodeList.find(e => e.hostname === msgNode.hostname);
+            matchedNode.lastMessage = interval;
+            if (matchedNode.nodeID !== msgNode.nodeID) {
+              matchedNode.nodeID = msgNode.nodeID;
+            }
+          } else {
+            nodeList.push(msgNode);
+          }
+          console.log("List of Alive Nodes");
+          console.log(nodeList);
+        }
+      }, {
+        noAck: true
+      });
+    });
+  });
+});
 
-}, 3000);
 
-//tell express to use the body parser. Note - This function was built into express but then moved to a seperate package.
+
+//Tell Express to use body parser
 app.use(bodyParser.json());
 
 //connect to the cluster
